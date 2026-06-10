@@ -6,7 +6,7 @@
 }:
 let
   cfg = config.programs.xcodes;
-  xcodes = lib.getExe cfg.package;
+  xcodes = lib.getExe' cfg.package "xcodes";
   installDirectory = toString cfg.installDirectory;
   versionInstalledChecks = lib.concatMapStringsSep "\n" (version: ''
     if ! printf '%s\n' "$available_xcodes" | grep -F -- ${lib.escapeShellArg version} >/dev/null; then
@@ -36,13 +36,8 @@ let
       echo "Xcode ${version} is not installed; skipping uninstall"
     fi
   '') cfg.removeVersions;
-  selectTarget =
-    if cfg.selectPath != null then
-      toString cfg.selectPath
-    else if cfg.selectVersion != null then
-      "${installDirectory}/Xcode-${cfg.selectVersion}.app"
-    else
-      null;
+  explicitSelectTarget = if cfg.selectPath != null then toString cfg.selectPath else null;
+  managedVersions = lib.concatStringsSep "\n" cfg.versions;
 in
 {
   options.programs.xcodes = {
@@ -71,7 +66,13 @@ in
       type = lib.types.listOf lib.types.str;
       default = [ ];
       example = [ "26.5" ];
-      description = "Installed Xcode versions to uninstall after requested versions are installed.";
+      description = "Additional installed Xcode versions to uninstall after requested versions are installed.";
+    };
+
+    pruneUnmanaged = lib.mkOption {
+      type = lib.types.bool;
+      default = true;
+      description = "Uninstall installed Xcode versions that are not listed in programs.xcodes.versions.";
     };
 
     selectPath = lib.mkOption {
@@ -122,15 +123,54 @@ in
       installed_xcodes="$(${xcodes} installed 2>/dev/null || true)"
       ${removalChecks}
 
-      ${lib.optionalString (selectTarget != null) ''
-        if [ -d ${lib.escapeShellArg selectTarget} ]; then
-          echo "Selecting ${selectTarget}"
-          /usr/bin/xcode-select -s ${lib.escapeShellArg selectTarget}/Contents/Developer || {
-            echo "error: failed to select Xcode at ${selectTarget}" >&2
+      ${lib.optionalString (cfg.pruneUnmanaged && cfg.versions != [ ]) ''
+        managed_versions=${lib.escapeShellArg managedVersions}
+        while IFS= read -r installed_line; do
+          [ -n "$installed_line" ] || continue
+          installed_version="$(printf '%s\n' "$installed_line" | sed -E 's#[[:space:]]+/.*$##; s#[[:space:]]*\([^)]*\)$##')"
+          if [ -z "$installed_version" ]; then
+            echo "error: failed to parse installed Xcode version from: $installed_line" >&2
+            exit 1
+          fi
+          if ! printf '%s\n' "$managed_versions" | grep -Fx -- "$installed_version" >/dev/null; then
+            echo "Uninstalling unmanaged Xcode $installed_version with xcodes"
+            ${xcodes} uninstall "$installed_version" --directory ${lib.escapeShellArg installDirectory} --empty-trash || {
+              echo "error: failed to uninstall unmanaged Xcode $installed_version" >&2
+              exit 1
+            }
+          fi
+        done <<EOF
+$installed_xcodes
+EOF
+      ''}
+
+      installed_xcodes="$(${xcodes} installed 2>/dev/null || true)"
+
+      ${lib.optionalString (cfg.selectPath != null || cfg.selectVersion != null) ''
+        ${lib.optionalString (cfg.selectPath != null) ''
+          select_target=${lib.escapeShellArg explicitSelectTarget}
+        ''}
+        ${lib.optionalString (cfg.selectPath == null && cfg.selectVersion != null) ''
+          select_target="$(printf '%s\n' "$installed_xcodes" | grep -F -- ${lib.escapeShellArg cfg.selectVersion} | head -n 1 | sed -E 's#^.*[[:space:]](/.*\.app)$#\1#')"
+          if [ -z "$select_target" ]; then
+            echo "error: requested Xcode selection version is not installed: ${cfg.selectVersion}" >&2
+            exit 1
+          fi
+          if [ "$select_target" = "$(printf '%s\n' "$installed_xcodes" | grep -F -- ${lib.escapeShellArg cfg.selectVersion} | head -n 1)" ]; then
+            echo "error: failed to determine installed Xcode app path for version: ${cfg.selectVersion}" >&2
+            echo "Matching xcodes installed line: $select_target" >&2
+            exit 1
+          fi
+        ''}
+
+        if [ -d "$select_target" ]; then
+          echo "Selecting $select_target"
+          /usr/bin/xcode-select -s "$select_target/Contents/Developer" || {
+            echo "error: failed to select Xcode at $select_target" >&2
             exit 1
           }
         else
-          echo "error: requested Xcode selection path does not exist: ${selectTarget}" >&2
+          echo "error: requested Xcode selection path does not exist: $select_target" >&2
           exit 1
         fi
       ''}
