@@ -9,13 +9,33 @@ let
   xcodes = lib.getExe cfg.package;
   installDirectory = toString cfg.installDirectory;
   versionInstalledChecks = lib.concatMapStringsSep "\n" (version: ''
+    if ! printf '%s\n' "$available_xcodes" | grep -F -- ${lib.escapeShellArg version} >/dev/null; then
+      echo "error: requested Xcode version was not found by xcodes: ${version}" >&2
+      echo "Run '${xcodes} list' to see valid version strings." >&2
+      exit 1
+    fi
+
     if ! printf '%s\n' "$installed_xcodes" | grep -F -- ${lib.escapeShellArg version} >/dev/null; then
       echo "Installing Xcode ${version} with xcodes"
-      ${xcodes} install ${lib.escapeShellArg version} --directory ${lib.escapeShellArg installDirectory}
+      ${xcodes} install ${lib.escapeShellArg version} --directory ${lib.escapeShellArg installDirectory} || {
+        echo "error: failed to install Xcode ${version}" >&2
+        exit 1
+      }
     else
       echo "Xcode ${version} already appears to be installed; skipping"
     fi
   '') cfg.versions;
+  removalChecks = lib.concatMapStringsSep "\n" (version: ''
+    if printf '%s\n' "$installed_xcodes" | grep -F -- ${lib.escapeShellArg version} >/dev/null; then
+      echo "Uninstalling Xcode ${version} with xcodes"
+      ${xcodes} uninstall ${lib.escapeShellArg version} --directory ${lib.escapeShellArg installDirectory} --empty-trash || {
+        echo "error: failed to uninstall Xcode ${version}" >&2
+        exit 1
+      }
+    else
+      echo "Xcode ${version} is not installed; skipping uninstall"
+    fi
+  '') cfg.removeVersions;
   selectTarget =
     if cfg.selectPath != null then
       toString cfg.selectPath
@@ -45,6 +65,13 @@ in
       default = null;
       example = "27 beta";
       description = "Version/name to select after installation.";
+    };
+
+    removeVersions = lib.mkOption {
+      type = lib.types.listOf lib.types.str;
+      default = [ ];
+      example = [ "26.5" ];
+      description = "Installed Xcode versions to uninstall after requested versions are installed.";
     };
 
     selectPath = lib.mkOption {
@@ -81,18 +108,30 @@ in
       }
     ];
 
-    system.activationScripts.xcodes.text = ''
+    system.activationScripts.extraActivation.text = lib.mkAfter ''
       echo "Managing Xcode installations with xcodes"
+
+      available_xcodes="$(${xcodes} list 2>/dev/null)" || {
+        echo "error: failed to list available Xcode versions with xcodes" >&2
+        exit 1
+      }
 
       installed_xcodes="$(${xcodes} installed 2>/dev/null || true)"
       ${versionInstalledChecks}
 
+      installed_xcodes="$(${xcodes} installed 2>/dev/null || true)"
+      ${removalChecks}
+
       ${lib.optionalString (selectTarget != null) ''
         if [ -d ${lib.escapeShellArg selectTarget} ]; then
           echo "Selecting ${selectTarget}"
-          /usr/bin/xcode-select -s ${lib.escapeShellArg selectTarget}/Contents/Developer
+          /usr/bin/xcode-select -s ${lib.escapeShellArg selectTarget}/Contents/Developer || {
+            echo "error: failed to select Xcode at ${selectTarget}" >&2
+            exit 1
+          }
         else
-          echo "warning: requested Xcode selection path does not exist: ${selectTarget}" >&2
+          echo "error: requested Xcode selection path does not exist: ${selectTarget}" >&2
+          exit 1
         fi
       ''}
 
