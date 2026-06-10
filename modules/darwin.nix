@@ -17,7 +17,7 @@ let
 
     if ! printf '%s\n' "$installed_xcodes" | grep -F -- ${lib.escapeShellArg version} >/dev/null; then
       echo "Installing Xcode ${version} with xcodes"
-      ${xcodes} install ${lib.escapeShellArg version} --directory ${lib.escapeShellArg installDirectory} || {
+      ${xcodes} install ${lib.escapeShellArg version} --experimental-unxip --directory ${lib.escapeShellArg installDirectory} || {
         echo "error: failed to install Xcode ${version}" >&2
         exit 1
       }
